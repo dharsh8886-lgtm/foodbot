@@ -1,0 +1,6 @@
+{
+  "name": "FoodBot",
+  "description": "AI Food Ordering Chatbot - Talk naturally to order food, explore recommendations, customize your cart, and checkout conversationally.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
