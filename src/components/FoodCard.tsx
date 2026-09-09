@@ -147,26 +147,35 @@ export const FoodCard: React.FC<FoodCardProps> = ({
           </div>
 
           {/* Add to Cart CTA */}
-          <button
-            onClick={handleAdd}
-            className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-white transition-all shadow-brand-sm active:scale-95 cursor-pointer ${
-              isAddedRecently
-                ? 'bg-emerald-500'
-                : 'bg-gradient-to-r from-[#7C3AED] to-[#EC4899] hover:opacity-95'
-            }`}
-          >
-            {isAddedRecently ? (
-              <>
-                <Check className="w-3.5 h-3.5 stroke-[3]" />
-                <span>Added!</span>
-              </>
-            ) : (
-              <>
-                <span>🩷</span>
-                <span>Add</span>
-              </>
-            )}
-          </button>
+          {item.available === false ? (
+            <button
+              disabled
+              className="px-3 py-2 rounded-xl text-xs font-bold text-gray-400 bg-gray-100 border border-gray-200 cursor-not-allowed"
+            >
+              Unavailable
+            </button>
+          ) : (
+            <button
+              onClick={handleAdd}
+              className={`flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-white transition-all shadow-brand-sm active:scale-95 cursor-pointer ${
+                isAddedRecently
+                  ? 'bg-emerald-500'
+                  : 'bg-gradient-to-r from-[#7C3AED] to-[#EC4899] hover:opacity-95'
+              }`}
+            >
+              {isAddedRecently ? (
+                <>
+                  <Check className="w-3.5 h-3.5 stroke-[3]" />
+                  <span>Added!</span>
+                </>
+              ) : (
+                <>
+                  <span>🩷</span>
+                  <span>Add</span>
+                </>
+              )}
+            </button>
+          )}
         </div>
       </div>
     </div>

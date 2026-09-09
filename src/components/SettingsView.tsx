@@ -1,14 +1,24 @@
 import React, { useState } from 'react';
-import { Settings, User, MapPin, Sparkles, Trash2, Check } from 'lucide-react';
+import { Settings, User, MapPin, Sparkles, Trash2, Check, Globe, AlertCircle, ToggleLeft, ToggleRight } from 'lucide-react';
+import { FoodItem } from '../types';
+import { SUPPORTED_LANGUAGES, SupportedLanguage } from '../utils/multilingual';
 
 interface SettingsViewProps {
   onClearAllData: () => void;
   onNavigateToChat: () => void;
+  menuItems?: FoodItem[];
+  onToggleAvailability?: (itemId: string) => void;
+  selectedLanguage?: SupportedLanguage;
+  onSelectLanguage?: (lang: SupportedLanguage) => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   onClearAllData,
-  onNavigateToChat
+  onNavigateToChat,
+  menuItems = [],
+  onToggleAvailability,
+  selectedLanguage = 'en',
+  onSelectLanguage
 }) => {
   const [userName, setUserName] = useState('Guest Foodie');
   const [userAddress, setUserAddress] = useState('22 Baker Street, Apt 4B');
@@ -68,6 +78,89 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </div>
         </div>
+
+        {/* Language Selection */}
+        <div className="bg-white rounded-3xl p-6 border border-purple-100 shadow-card space-y-4">
+          <h3 className="text-sm font-bold text-[#24152F] flex items-center gap-2">
+            <Globe className="w-4 h-4 text-[#7C3AED]" /> Assistant Language
+          </h3>
+          <p className="text-xs text-[#24152F]/60">
+            Select your preferred language. FoodBot can also automatically detect when you type or speak in any of these languages!
+          </p>
+
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+            {SUPPORTED_LANGUAGES.map((lang) => (
+              <button
+                key={lang.code}
+                type="button"
+                onClick={() => onSelectLanguage && onSelectLanguage(lang.code)}
+                className={`p-3 rounded-2xl border text-left font-bold transition-all cursor-pointer ${
+                  selectedLanguage === lang.code
+                    ? 'border-[#7C3AED] bg-[#F3E8FF] text-[#7C3AED] shadow-2xs'
+                    : 'border-purple-100 bg-[#FAF7FF] text-[#24152F] hover:border-purple-200'
+                }`}
+              >
+                <div className="text-sm">{lang.nativeName}</div>
+                <div className="text-[11px] font-medium text-[#24152F]/50">{lang.name}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Menu Item Availability Manager (For Testing Availability Logic) */}
+        {menuItems.length > 0 && onToggleAvailability && (
+          <div className="bg-white rounded-3xl p-6 border border-purple-100 shadow-card space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-bold text-[#24152F] flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-500" /> Item Availability Testing
+              </h3>
+              <span className="text-[11px] text-[#24152F]/50 font-medium">
+                Toggle item stock status
+              </span>
+            </div>
+            <p className="text-xs text-[#24152F]/60">
+              Turn an item OFF to test FoodBot&apos;s availability logic! When an item is marked unavailable, FoodBot will refuse to add it to the cart and will suggest an available alternative from the menu.
+            </p>
+
+            <div className="max-h-60 overflow-y-auto divide-y divide-purple-50 pr-1">
+              {menuItems.map((item) => (
+                <div key={item.id} className="py-2 flex items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span
+                      className={`w-2 h-2 rounded-full ${
+                        item.vegetarian ? 'bg-emerald-500' : 'bg-rose-500'
+                      }`}
+                    />
+                    <span className="font-bold text-[#24152F] truncate">{item.name}</span>
+                    <span className="text-[10px] text-[#24152F]/50">₹{item.price}</span>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => onToggleAvailability(item.id)}
+                    className={`px-3 py-1 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      item.available
+                        ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                        : 'bg-rose-50 text-rose-700 border border-rose-200'
+                    }`}
+                  >
+                    {item.available ? (
+                      <>
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                        <span>Available</span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="w-1.5 h-1.5 rounded-full bg-rose-500" />
+                        <span>Unavailable</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Dietary Preferences */}
         <div className="bg-white rounded-3xl p-6 border border-purple-100 shadow-card space-y-4">

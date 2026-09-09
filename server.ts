@@ -2,7 +2,14 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { GoogleGenAI } from '@google/genai';
-import { MENU_ITEMS } from './src/data/menu';
+import { MENU_ITEMS, findItemByName, MENU_CATEGORIES } from './src/data/menu';
+import {
+  detectLanguage,
+  extractQuantity,
+  FOOD_VOCABULARY_MAP,
+  CONVERSATIONAL_RESPONSES,
+  SupportedLanguage
+} from './src/utils/multilingual';
 
 const app = express();
 const PORT = 3000;
@@ -32,33 +39,81 @@ app.get('/api/health', (req, res) => {
 
 // Menu endpoint
 app.get('/api/menu', (req, res) => {
-  res.json({ items: MENU_ITEMS });
+  res.json({ items: MENU_ITEMS, categories: MENU_CATEGORIES });
 });
 
-// Heuristic fallback NLU parser for guaranteed responsiveness
-function handleHeuristicNLU(message: string, currentCart: any[], checkoutStep?: string) {
+// Helper to find item using vocabulary map, Tamil script, Tanglish, and exact names
+function resolveItemFromQuery(query: string) {
+  const lower = query.toLowerCase().trim();
+
+  // Sort keys by descending length so multi-word keys match first (e.g. "veg biryani" before "biryani")
+  const sortedKeys = Object.keys(FOOD_VOCABULARY_MAP).sort((a, b) => b.length - a.length);
+  for (const key of sortedKeys) {
+    if (lower.includes(key.toLowerCase())) {
+      const id = FOOD_VOCABULARY_MAP[key];
+      const item = MENU_ITEMS.find((m) => m.id === id);
+      if (item) return item;
+    }
+  }
+
+  return findItemByName(query);
+}
+
+// Comprehensive Heuristic NLU with Intent-Based Routing, Tanglish, and Multilingual Support
+function handleHeuristicNLU(
+  message: string,
+  currentCart: any[],
+  checkoutStep?: string,
+  clientLang?: string,
+  unavailableItemIds: string[] = []
+) {
   const text = message.toLowerCase().trim();
 
-  // If in checkout flow
+  // Determine language (respect Tanglish 'ta-Latn', Tamil 'ta', etc.)
+  const detected = detectLanguage(message);
+  const lang: SupportedLanguage =
+    clientLang && clientLang !== 'auto' && detected === 'en'
+      ? (clientLang as SupportedLanguage)
+      : detected;
+
+  const langPack = CONVERSATIONAL_RESPONSES[lang] || CONVERSATIONAL_RESPONSES.en;
+
+  // 1. ACTIVE CHECKOUT FLOW
   if (checkoutStep === 'name') {
     return {
-      reply: `Great to meet you, ${message.trim()}! 📍 Where should I deliver your order? (Enter your full delivery address)`,
+      intent: 'CHECKOUT',
+      reply:
+        lang === 'ta-Latn'
+          ? `Super, ${message.trim()}! 📍 Enga deliver pannanum? Unga address type pannunga.`
+          : lang === 'ta'
+          ? `மகிழ்ச்சி, ${message.trim()}! 📍 எங்கு டெலிவரி செய்ய வேண்டும்? முகவரியை உள்ளிடவும்.`
+          : `Great to meet you, ${message.trim()}! 📍 Where should I deliver your order? (Enter your delivery address)`,
       checkoutStep: 'address',
       actions: [],
       suggestedItemIds: [],
+      showMenu: false,
+      language: lang,
       quickReplies: [
         { label: '🏠 22 Baker Street, Apt 4B', actionText: '22 Baker Street, Apt 4B' },
-        { label: '🏢 Tech Park, Building 3, Floor 5', actionText: 'Tech Park, Building 3, Floor 5' }
+        { label: '🏢 Tech Park, Building 3', actionText: 'Tech Park, Building 3' }
       ]
     };
   }
 
   if (checkoutStep === 'address') {
     return {
-      reply: `Got it! Delivering to "${message.trim()}". 💳 And how would you like to pay?`,
+      intent: 'CHECKOUT',
+      reply:
+        lang === 'ta-Latn'
+          ? `Got it! "${message.trim()}"-ku deliver panrom. 💳 Eppadi pay panna poreenga?`
+          : lang === 'ta'
+          ? `முகவரி பெறப்பட்டது: "${message.trim()}". 💳 எவ்வாறு பணம் செலுத்த விரும்புகிறீர்கள்?`
+          : `Got it! Delivering to "${message.trim()}". 💳 And how would you like to pay?`,
       checkoutStep: 'payment',
       actions: [],
       suggestedItemIds: [],
+      showMenu: false,
+      language: lang,
       quickReplies: [
         { label: '💵 Cash on Delivery', actionText: 'Cash on Delivery' },
         { label: '📱 UPI', actionText: 'UPI' },
@@ -67,16 +122,30 @@ function handleHeuristicNLU(message: string, currentCart: any[], checkoutStep?: 
     };
   }
 
-  if (checkoutStep === 'payment' || text.includes('cash on delivery') || text === 'upi' || text === 'card') {
+  if (
+    checkoutStep === 'payment' ||
+    text === 'cash on delivery' ||
+    text === 'upi' ||
+    text === 'card' ||
+    text.includes('cod')
+  ) {
     let method = 'Cash on Delivery';
     if (text.includes('upi')) method = 'UPI';
     if (text.includes('card')) method = 'Card';
     return {
-      reply: `Payment method selected: ${method}! Everything looks delicious. Ready to place your order? 🩷`,
+      intent: 'CHECKOUT',
+      reply:
+        lang === 'ta-Latn'
+          ? `Payment method selected: ${method}! Ellam ready. Order place pannalama? 🩷`
+          : lang === 'ta'
+          ? `பணம் செலுத்தும் முறை: ${method}! ஆர்டரை உறுதி செய்யலாமா? 🩷`
+          : `Payment method selected: ${method}! Everything looks delicious. Ready to place your order? 🩷`,
       checkoutStep: 'confirm',
       actions: [],
       suggestedItemIds: [],
+      showMenu: false,
       paymentMethod: method,
+      language: lang,
       quickReplies: [
         { label: '🩷 Place Order', actionText: 'Place Order' },
         { label: '✏️ Edit Order', actionText: 'Show my cart' }
@@ -84,307 +153,626 @@ function handleHeuristicNLU(message: string, currentCart: any[], checkoutStep?: 
     };
   }
 
-  // Clear cart / changed my mind
-  if (text.includes('changed my mind') || text.includes('clear cart') || text.includes('empty cart') || text.includes('cancel order')) {
+  // 2. HUNGER / CONVERSATIONAL EXPRESSIONS (TEST 2: "enaku pasikuthu", "enaku romba pasikuthu")
+  // Do NOT treat this as an exact food command or randomly add food!
+  if (
+    text.includes('pasikuthu') ||
+    text.includes('pasikudhu') ||
+    text.includes('pasi') ||
+    text.includes('hungry') ||
+    text.includes('starving') ||
+    text.includes('bhook') ||
+    text.includes('bhookh') ||
+    text.includes('பசிக்கிறது')
+  ) {
     return {
-      reply: "No worries at all! I've cleared your cart. What would you like to explore instead? 💜",
-      actions: [{ type: 'CLEAR_CART' }],
-      suggestedItemIds: ['item-1', 'item-13'],
+      intent: 'GENERAL_CONVERSATION',
+      reply: langPack.hungry,
+      showMenu: false,
+      actions: [],
+      suggestedItemIds: [],
+      language: lang,
       quickReplies: [
-        { label: '🍛 I want Biryani', actionText: 'I want Biryani' },
-        { label: '🍕 Show me Pizza', actionText: 'Show me Pizza' },
-        { label: '🥗 Vegetarian food', actionText: 'Show vegetarian food' }
+        { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : lang === 'ta' ? 'மெனுவைக் காட்டு' : 'Show me the menu' },
+        { label: langPack.quickReplies.biryani, actionText: lang === 'ta-Latn' ? 'enaku chicken biryani venum' : 'I want Biryani' },
+        { label: langPack.quickReplies.pizza, actionText: lang === 'ta-Latn' ? 'pizza kaatu' : 'Show me Pizza' }
       ]
     };
   }
 
-  // Checkout trigger
-  if (text.includes('checkout') || text.includes('place order') || text.includes('proceed to checkout') || text.includes('order now') || text.includes('pay')) {
-    if (!currentCart || currentCart.length === 0) {
+  // 3. NORMAL CONVERSATION & GREETINGS (TEST 1: "Hi", "vanakkam", "வணக்கம்", "namaste")
+  // Do NOT immediately show food or the menu!
+  const isGreeting =
+    /^(hi|hello|hey|heyy|hiya|hola|namaste|namaskar|vanakkam|vanakam|namaskaram|good\s+morning|good\s+afternoon|good\s+evening|yo|sup)\b/i.test(
+      text
+    ) ||
+    text === 'வணக்கம்' ||
+    text === 'नमस्ते' ||
+    text === 'నమస్కారం' ||
+    text === 'നമസ്കാരം' ||
+    text === 'ನಮಸ್ಕಾರ';
+
+  if (
+    isGreeting &&
+    !text.includes('biryani') &&
+    !text.includes('menu') &&
+    !text.includes('food') &&
+    !text.includes('order') &&
+    !text.includes('coke')
+  ) {
+    return {
+      intent: 'GREETING',
+      reply: langPack.greeting,
+      showMenu: false,
+      actions: [],
+      suggestedItemIds: [],
+      language: lang,
+      quickReplies: [
+        { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : lang === 'ta' ? 'மெனுவைக் காட்டு' : 'Show me the menu' },
+        { label: '💡 What can you do?', actionText: 'What can you do?' },
+        { label: langPack.quickReplies.biryani, actionText: lang === 'ta-Latn' ? 'enaku chicken biryani venum' : 'I want Biryani' }
+      ]
+    };
+  }
+
+  // Small talk: How are you?
+  if (
+    text.includes('how are you') ||
+    text.includes("how're you") ||
+    text.includes('how r u') ||
+    text.includes('kaise ho') ||
+    text.includes('epadi irukinga') ||
+    text.includes('eppadi irukkeenga') ||
+    text.includes('ela unnaru') ||
+    text.includes('entha vishesham') ||
+    text.includes('hegiddeera')
+  ) {
+    return {
+      intent: 'GENERAL_CONVERSATION',
+      reply: langPack.howAreYou,
+      showMenu: false,
+      actions: [],
+      suggestedItemIds: [],
+      language: lang,
+      quickReplies: [
+        { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' },
+        { label: langPack.quickReplies.biryani, actionText: lang === 'ta-Latn' ? 'enaku chicken biryani venum' : 'I want Biryani' }
+      ]
+    };
+  }
+
+  // Small talk: Thank you (TEST 9: "thank you", "nandri")
+  if (
+    text.includes('thank you') ||
+    text.includes('thanks') ||
+    text.includes('thx') ||
+    text.includes('shukriya') ||
+    text.includes('dhanyawad') ||
+    text.includes('nandri') ||
+    text.includes('dhanyavadalu') ||
+    text.includes('nanni') ||
+    text.includes('dhanyavadagalu') ||
+    text === 'நன்றி' ||
+    text === 'धन्यवाद' ||
+    text === 'ధన్యవాదాలు' ||
+    text === 'നന്ദി' ||
+    text === 'ಧನ್ಯವಾದಗಳು'
+  ) {
+    return {
+      intent: 'GENERAL_CONVERSATION',
+      reply: langPack.thankYou,
+      showMenu: false,
+      actions: [],
+      suggestedItemIds: [],
+      language: lang,
+      quickReplies: [
+        { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' },
+        { label: langPack.quickReplies.checkout, actionText: lang === 'ta-Latn' ? 'checkout pannalam' : 'Checkout' }
+      ]
+    };
+  }
+
+  // Small talk: Who are you?
+  if (
+    text.includes('who are you') ||
+    text.includes('what are you') ||
+    text.includes('what is your name') ||
+    text.includes('who made you') ||
+    text.includes('koun ho') ||
+    text.includes('yaar nee')
+  ) {
+    return {
+      intent: 'GENERAL_CONVERSATION',
+      reply: langPack.whoAreYou,
+      showMenu: false,
+      actions: [],
+      suggestedItemIds: [],
+      language: lang,
+      quickReplies: [
+        { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' },
+        { label: '💡 What can you do?', actionText: 'What can you do?' }
+      ]
+    };
+  }
+
+  // Small talk: What can you do? / Help
+  if (
+    text.includes('what can you do') ||
+    text.includes('features') ||
+    text.includes('what do you do') ||
+    text.includes('capabilities') ||
+    text === 'help' ||
+    text.includes('how to use') ||
+    text.includes('enna panna mudiyum')
+  ) {
+    return {
+      intent: 'HELP',
+      reply: langPack.whatCanYouDo,
+      showMenu: false,
+      actions: [],
+      suggestedItemIds: [],
+      language: lang,
+      quickReplies: [
+        { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' },
+        { label: langPack.quickReplies.biryani, actionText: lang === 'ta-Latn' ? 'enaku chicken biryani venum' : 'I want Biryani' },
+        { label: langPack.quickReplies.under150, actionText: lang === 'ta-Latn' ? '150 kulla' : 'Show me items under ₹150' },
+        { label: langPack.quickReplies.vegFood, actionText: lang === 'ta-Latn' ? 'veg food mattum' : 'Show vegetarian food' }
+      ]
+    };
+  }
+
+  // Bye / Goodbye
+  if (
+    text.includes('bye') ||
+    text.includes('goodbye') ||
+    text.includes('see you') ||
+    text.includes('cya') ||
+    text.includes('varen') ||
+    text.includes('poyitu varen')
+  ) {
+    return {
+      intent: 'GENERAL_CONVERSATION',
+      reply: langPack.bye,
+      showMenu: false,
+      actions: [],
+      suggestedItemIds: [],
+      language: lang,
+      quickReplies: [{ label: '👋 Hi again!', actionText: 'Hi' }]
+    };
+  }
+
+  // 4. VEGETARIAN ONLY FILTER (TEST 6: "veg food mattum kaatu", "சைவ உணவு மட்டும் காட்டு", "veg mattum")
+  if (
+    (text.includes('veg') || text.includes('vegetarian') || text.includes('சைவ')) &&
+    (text.includes('mattum') ||
+      text.includes('only') ||
+      text.includes('மட்டும்') ||
+      text.includes('food mattum') ||
+      text.includes('sivappu illa') ||
+      text === 'veg' ||
+      text === 'pure veg')
+  ) {
+    const vegItems = MENU_ITEMS.filter((i) => i.vegetarian && i.available);
+    return {
+      intent: 'FILTER_VEG',
+      reply:
+        lang === 'ta-Latn'
+          ? "Idho namma available vegetarian dishes! 🥗 Paneer Butter Masala, Veg Biryani, Masala Dosa, Idli, Veg Burger..."
+          : lang === 'ta'
+          ? "இதோ நமது 100% சைவ உணவுப் பட்டியல்! 🥗 பன்னீர் பட்டர் மசாலா, வெஜ் பிரியாணி, மசாலா தோசை..."
+          : "Here is our 100% vegetarian selection! 🥗 From Paneer Butter Masala to Veg Biryani and crispy Dosas:",
+      showMenu: true,
+      filterVeg: true,
+      menuCategory: 'All',
+      actions: [],
+      suggestedItemIds: vegItems.map((i) => i.id),
+      language: lang,
+      quickReplies: [
+        { label: '🍛 Veg Biryani ₹140', actionText: lang === 'ta-Latn' ? 'enaku 1 veg biryani venum' : 'I want 1 veg biryani' },
+        { label: '🧀 Paneer Butter Masala ₹160', actionText: 'Add Paneer Butter Masala' },
+        { label: '🥞 Masala Dosa ₹90', actionText: 'Add Masala Dosa' }
+      ]
+    };
+  }
+
+  // 5. PRICE FILTER (TEST 7: "150 kulla enna irukku?", "150 rupees kulla enna irukku?", "under 150")
+  const kullaPriceMatch =
+    text.match(/(\d+)\s*(?:rupees|rs)?\s*(?:kulla|ulla|க்குள்ள|க்குள்)/i) ||
+    text.match(/under\s*₹?\s*(\d+)/i) ||
+    text.match(/below\s*₹?\s*(\d+)/i) ||
+    text.match(/less\s*than\s*₹?\s*(\d+)/i);
+
+  if (kullaPriceMatch) {
+    const maxP = parseInt(kullaPriceMatch[1], 10);
+    const underItems = MENU_ITEMS.filter((i) => i.price <= maxP && i.available);
+    return {
+      intent: 'FILTER_PRICE',
+      reply:
+        lang === 'ta-Latn'
+          ? `₹${maxP} kulla ${underItems.length} tasty items irukku! 💰 Veg Biryani (₹140), Veg Burger (₹120), French Fries (₹100), Masala Dosa (₹90)...`
+          : lang === 'ta'
+          ? `₹${maxP}க்குள் ${underItems.length} சிறந்த உணவுகள் உள்ளன! 💰`
+          : `Found ${underItems.length} delicious options under ₹${maxP}! 💰`,
+      showMenu: true,
+      maxPrice: maxP,
+      menuCategory: 'All',
+      actions: [],
+      suggestedItemIds: underItems.slice(0, 6).map((i) => i.id),
+      language: lang,
+      quickReplies: [
+        { label: '🍛 Veg Biryani ₹140', actionText: 'Add Veg Biryani' },
+        { label: '🍔 Veg Burger ₹120', actionText: 'Add Veg Burger' },
+        { label: '🍟 French Fries ₹100', actionText: 'Add French Fries' }
+      ]
+    };
+  }
+
+  // 6. MENU REQUEST (TEST 3: "menu kaatu", "show menu", "menu kudu", "menu show pannu", "what food do you have?", "enna food irukku?", "enna saapadu irukku?")
+  if (
+    text === 'menu' ||
+    text === 'menu kaatu' ||
+    text.includes('menu kaatu') ||
+    text.includes('menu kudu') ||
+    text.includes('menu show') ||
+    text.includes('show menu') ||
+    text.includes('see menu') ||
+    text.includes('view menu') ||
+    text.includes('what food do you have') ||
+    text.includes('what food') ||
+    text.includes('enna food irukku') ||
+    text.includes('enna saapadu irukku') ||
+    text.includes('food list') ||
+    text.includes('all items') ||
+    text === 'மெனு' ||
+    text === 'மேனு' ||
+    text.includes('மெனுவைக் காட்டு') ||
+    text.includes('மெனு காட்டு') ||
+    text.includes('मेन्यू दिखाओ') ||
+    text.includes('మెనూ చూపించు') ||
+    text.includes('ಮೆನು ತೋರಿಸಿ')
+  ) {
+    return {
+      intent: 'MENU_REQUEST',
+      reply: langPack.menuIntro,
+      showMenu: true,
+      menuCategory: 'All',
+      actions: [],
+      suggestedItemIds: [],
+      language: lang,
+      quickReplies: [
+        { label: '🇮🇳 Indian (6)', actionText: 'Show Indian food' },
+        { label: '🥢 Chinese (4)', actionText: 'Show Chinese food' },
+        { label: '🍕 Pizzas (2)', actionText: 'Show me Pizza' },
+        { label: '🥗 Veg Only', actionText: lang === 'ta-Latn' ? 'veg food mattum kaatu' : 'Show vegetarian food' },
+        { label: '💰 Under ₹150', actionText: lang === 'ta-Latn' ? '150 kulla enna irukku?' : 'Show me items under ₹150' }
+      ]
+    };
+  }
+
+  // 7. REMOVE ITEM FROM CART (e.g. "coke remove pannu", "coke eduthu vidu", "remove chicken biryani")
+  if (
+    text.includes('remove') ||
+    text.includes('delete') ||
+    text.includes('eduthu vidu') ||
+    text.includes('eduthuvidu') ||
+    text.includes('edunga') ||
+    text.includes('vendam') ||
+    text.includes('நீக்கவும்') ||
+    text.includes('எடுத்துவிடு') ||
+    text.includes('hatao')
+  ) {
+    const itemToRemove = resolveItemFromQuery(text);
+    if (itemToRemove) {
       return {
-        reply: "Your cart is currently empty! Add something delicious first like our Chicken Biryani or Margherita Pizza. What are you craving? 🍛",
-        actions: [],
-        suggestedItemIds: ['item-1', 'item-13', 'item-3'],
+        intent: 'REMOVE_FROM_CART',
+        reply: langPack.removedFromCart(itemToRemove.name),
+        actions: [{ type: 'REMOVE_ITEM', itemId: itemToRemove.id, quantity: 1 }],
+        suggestedItemIds: [itemToRemove.id],
+        showMenu: false,
+        language: lang,
         quickReplies: [
-          { label: '🍛 Chicken Biryani ₹180', actionText: 'I want 1 chicken biryani' },
-          { label: '🍕 Margherita Pizza ₹220', actionText: 'Add Margherita Pizza' }
+          { label: '🛒 Show Cart', actionText: lang === 'ta-Latn' ? 'cart kaatu' : 'Show my cart' },
+          { label: langPack.quickReplies.checkout, actionText: lang === 'ta-Latn' ? 'checkout pannalam' : 'Checkout' }
         ]
       };
     }
-    const total = currentCart.reduce((sum, c) => sum + (c.item?.price || 0) * (c.quantity || 1), 0) + 30;
+  }
+
+  // 8. CLEAR CART
+  if (
+    text.includes('clear cart') ||
+    text.includes('empty cart') ||
+    text.includes('cart clear') ||
+    text.includes('cancel order')
+  ) {
     return {
-      reply: `Perfect! Your total with delivery is ₹${total}. Let's complete your order. What's your name? 👤`,
+      intent: 'CLEAR_CART',
+      reply: langPack.clearedCart,
+      actions: [{ type: 'CLEAR_CART' }],
+      suggestedItemIds: [],
+      showMenu: false,
+      language: lang,
+      quickReplies: [
+        { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' },
+        { label: langPack.quickReplies.biryani, actionText: lang === 'ta-Latn' ? 'enaku chicken biryani venum' : 'I want Biryani' }
+      ]
+    };
+  }
+
+  // 9. SHOW CART
+  if (
+    text.includes('show cart') ||
+    text.includes('view cart') ||
+    text.includes('what is in my cart') ||
+    text.includes('check cart') ||
+    text.includes('cart kaatu') ||
+    text.includes('கார்ட்டைக் காட்டு') ||
+    text === 'cart'
+  ) {
+    if (!currentCart || currentCart.length === 0) {
+      return {
+        intent: 'SHOW_CART',
+        reply: langPack.emptyCart,
+        actions: [{ type: 'SHOW_CART' }],
+        suggestedItemIds: [],
+        showMenu: false,
+        language: lang,
+        quickReplies: [
+          { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' },
+          { label: langPack.quickReplies.biryani, actionText: lang === 'ta-Latn' ? 'enaku chicken biryani venum' : 'I want Biryani' }
+        ]
+      };
+    }
+    const summary = currentCart.map((c) => `${c.item.name} × ${c.quantity}`).join(', ');
+    const sub = currentCart.reduce((sum, c) => sum + c.item.price * c.quantity, 0);
+    const total = sub + 30;
+    return {
+      intent: 'SHOW_CART',
+      reply: langPack.cartSummary(summary, total),
+      actions: [{ type: 'SHOW_CART' }],
+      suggestedItemIds: currentCart.map((c) => c.item.id),
+      showMenu: false,
+      language: lang,
+      quickReplies: [
+        { label: langPack.quickReplies.checkout, actionText: lang === 'ta-Latn' ? 'checkout pannalam' : 'Checkout' },
+        { label: '🥤 Add Coke ₹50', actionText: lang === 'ta-Latn' ? 'oru coke add pannu' : 'Add a Coke' },
+        { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' }
+      ]
+    };
+  }
+
+  // 10. CHECKOUT TRIGGER ("checkout", "checkout pannalam", "checkout pannalama", "ஆர்டர் செய்ய வேண்டும்", "order podu")
+  if (
+    text.includes('checkout') ||
+    text.includes('place order') ||
+    text.includes('buy now') ||
+    text.includes('order podu') ||
+    text.includes('order pannu') ||
+    text.includes('order செய்ய') ||
+    text.includes('ஆர்டர்')
+  ) {
+    if (!currentCart || currentCart.length === 0) {
+      return {
+        intent: 'CHECKOUT',
+        reply: langPack.emptyCart,
+        actions: [],
+        suggestedItemIds: [],
+        showMenu: false,
+        language: lang,
+        quickReplies: [
+          { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' },
+          { label: langPack.quickReplies.biryani, actionText: lang === 'ta-Latn' ? 'enaku chicken biryani venum' : 'I want Biryani' }
+        ]
+      };
+    }
+    const total =
+      currentCart.reduce((sum, c) => sum + (c.item?.price || 0) * (c.quantity || 1), 0) + 30;
+    return {
+      intent: 'CHECKOUT',
+      reply:
+        lang === 'ta-Latn'
+          ? `Super! Delivery serthu total ₹${total}. Order finish pannalaam! Unga name enna? 👤`
+          : lang === 'ta'
+          ? `மொத்த தொகை ₹${total}. ஆர்டர் செய்ய உங்கள் பெயர் என்ன? 👤`
+          : `Perfect! Your total with delivery is ₹${total}. Let's complete your order. What's your name? 👤`,
       checkoutStep: 'name',
       actions: [{ type: 'START_CHECKOUT' }],
       suggestedItemIds: [],
+      showMenu: false,
+      language: lang,
       quickReplies: [
-        { label: '👤 John Doe', actionText: 'John Doe' },
+        { label: '👤 Guest Foodie', actionText: 'Guest Foodie' },
         { label: '👤 Priya Sharma', actionText: 'Priya Sharma' }
       ]
     };
   }
 
-  // Show cart
-  if (text.includes('show my cart') || text.includes('what is in my cart') || text.includes('view cart') || text === 'cart') {
-    if (!currentCart || currentCart.length === 0) {
+  // 11. ADD TO CART / ORDER INTENTS (TEST 4: "enaku 2 chicken biryani venum", "rendu chicken biryani kudu", TEST 5: "oru coke add pannu", "biryani 3 venum")
+  // Check if text indicates a food request or contains any of the 20 food items
+  const resolvedItem = resolveItemFromQuery(text);
+
+  if (resolvedItem) {
+    const qty = extractQuantity(text);
+
+    // CRITICAL: Availability Check!
+    const isItemAvailable = resolvedItem.available && !unavailableItemIds.includes(resolvedItem.id);
+    if (!isItemAvailable) {
+      const alt =
+        MENU_ITEMS.find(
+          (m) =>
+            m.category === resolvedItem.category &&
+            m.id !== resolvedItem.id &&
+            m.available &&
+            !unavailableItemIds.includes(m.id)
+        ) ||
+        MENU_ITEMS.find(
+          (m) =>
+            m.vegetarian === resolvedItem.vegetarian &&
+            m.id !== resolvedItem.id &&
+            m.available &&
+            !unavailableItemIds.includes(m.id)
+        );
+
       return {
-        reply: "Your cart is currently empty! What would you like to add? 🛒",
-        actions: [{ type: 'SHOW_CART' }],
-        suggestedItemIds: ['item-1', 'item-17'],
-        quickReplies: [
-          { label: '🍛 I want Biryani', actionText: 'I want Biryani' },
-          { label: '🍕 Show me Pizza', actionText: 'Show me Pizza' }
-        ]
+        intent: 'ADD_TO_CART',
+        reply: langPack.itemUnavailable(resolvedItem.name, alt?.name),
+        showMenu: false,
+        actions: [],
+        suggestedItemIds: alt ? [alt.id] : [],
+        language: lang,
+        quickReplies: alt
+          ? [
+              { label: `+ Add ${alt.name} ₹${alt.price}`, actionText: `Add ${alt.name}` },
+              { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' }
+            ]
+          : [{ label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' }]
       };
     }
-    const itemsSummary = currentCart.map(c => `${c.item.name} × ${c.quantity} (₹${c.item.price * c.quantity})`).join(', ');
-    const sub = currentCart.reduce((sum, c) => sum + c.item.price * c.quantity, 0);
+
+    // Item is available! Add to cart with requested quantity
+    const isDrink = resolvedItem.category === 'Beverages';
+    const isDessert = resolvedItem.category === 'Desserts';
+
+    const drinkUpsell =
+      lang === 'ta-Latn'
+        ? !isDrink && !isDessert ? "Vera edhavadhu drink venuma? 🩷" : "Checkout pannalama? 🩷"
+        : lang === 'ta'
+        ? !isDrink && !isDessert ? "குடிக்க ஏதாவது குளிர்பானம் வேண்டுமா? 🩷" : "ஆர்டர் செய்யலாமா? 🩷"
+        : !isDrink && !isDessert ? "Would you like something to drink? 🩷" : "Ready to checkout? 🩷";
+
+    const quicks = !isDrink
+      ? [
+          { label: '🥤 Coke ₹50', actionText: lang === 'ta-Latn' ? 'oru coke add pannu' : 'Add a Coke' },
+          { label: '🍋 Fresh Lime ₹70', actionText: 'Add Fresh Lime Juice' },
+          { label: langPack.quickReplies.checkout, actionText: lang === 'ta-Latn' ? 'checkout pannalam' : 'Checkout' }
+        ]
+      : [
+          { label: '🍯 Gulab Jamun ₹70', actionText: 'Add Gulab Jamun' },
+          { label: langPack.quickReplies.checkout, actionText: lang === 'ta-Latn' ? 'checkout pannalam' : 'Checkout' }
+        ];
+
     return {
-      reply: `Here's what you've got in your cart: ${itemsSummary}. Subtotal: ₹${sub}, Total with delivery: ₹${sub + 30}. Ready to checkout? 🩷`,
-      actions: [{ type: 'SHOW_CART' }],
-      suggestedItemIds: currentCart.map(c => c.item.id),
+      intent: 'ADD_TO_CART',
+      reply:
+        lang === 'ta-Latn'
+          ? `Sure! ${qty} ${resolvedItem.name}${qty > 1 ? 's' : ''} cart-la add pannitten! ${drinkUpsell}`
+          : lang === 'ta'
+          ? `நிச்சயமாக! ${qty} ${resolvedItem.name} கார்ட்டில் சேர்க்கப்பட்டது! ${drinkUpsell}`
+          : `Sure! ${qty} ${resolvedItem.name}${qty > 1 ? 's have' : ' has'} been added to your cart. ${drinkUpsell}`,
+      actions: [{ type: 'ADD_ITEM', itemId: resolvedItem.id, quantity: qty }],
+      suggestedItemIds: [resolvedItem.id],
+      showMenu: false,
+      language: lang,
+      quickReplies: quicks
+    };
+  }
+
+  // 12. CATEGORY FILTERS (Indian, Chinese, Burgers, Pizza, Snacks, Desserts, Beverages)
+  if (text.includes('indian')) {
+    const items = MENU_ITEMS.filter((i) => i.category === 'Indian' && i.available);
+    return {
+      intent: 'FILTER_CATEGORY',
+      reply: "Here is our authentic Indian selection! 🍛 From royal Dum Biryanis to Paneer Butter Masala and crispy Dosas:",
+      showMenu: true,
+      menuCategory: 'Indian',
+      actions: [],
+      suggestedItemIds: items.map((i) => i.id),
+      language: lang,
       quickReplies: [
-        { label: '🩷 Proceed to Checkout', actionText: 'Checkout' },
-        { label: '🥤 Add a Coke', actionText: 'Add a Coke' },
-        { label: '🍰 Add Dessert', actionText: 'Show me desserts' }
+        { label: '🍛 Chicken Biryani ₹180', actionText: 'I want 1 chicken biryani' },
+        { label: '🥞 Masala Dosa ₹90', actionText: 'Add Masala Dosa' },
+        { label: '🫓 Butter Naan ₹50', actionText: 'Add Butter Naan' }
       ]
     };
   }
 
-  // Cheapest food
-  if (text.includes('cheapest') || text.includes('lowest price') || text.includes('budget') || text.includes('least expensive')) {
-    const cheap = [...MENU_ITEMS].sort((a, b) => a.price - b.price).slice(0, 4);
+  if (text.includes('chinese')) {
+    const items = MENU_ITEMS.filter((i) => i.category === 'Chinese' && i.available);
     return {
-      reply: `Here are our most pocket-friendly bites! Butter Naan and Coke start at just ₹50, followed by Idli at ₹60 and Gulab Jamun at ₹70. 💰`,
+      intent: 'FILTER_CATEGORY',
+      reply: "Here are our wok-tossed Chinese favorites! 🥢 Wok-charred Fried Rice and spicy Schezwan Hakka Noodles:",
+      showMenu: true,
+      menuCategory: 'Chinese',
       actions: [],
-      suggestedItemIds: cheap.map(c => c.id),
+      suggestedItemIds: items.map((i) => i.id),
+      language: lang,
       quickReplies: [
-        { label: '🥞 2 Idlis ₹120', actionText: 'Give me 2 idlis' },
-        { label: '🫓 2 Butter Naans ₹100', actionText: 'Add 2 butter naans' },
-        { label: '🥤 Add a Coke ₹50', actionText: 'Add a Coke' }
+        { label: '🍗 Chicken Fried Rice ₹170', actionText: 'Add Chicken Fried Rice' },
+        { label: '🍜 Veg Noodles ₹120', actionText: 'Add Veg Noodles' }
       ]
     };
   }
 
-  // Under ₹150 / Under ₹200
-  const underPriceMatch = text.match(/under\s*₹?\s*(\d+)/i) || text.match(/less\s*than\s*₹?\s*(\d+)/i) || text.match(/below\s*₹?\s*(\d+)/i);
-  if (underPriceMatch) {
-    const maxP = parseInt(underPriceMatch[1], 10);
-    const filtered = MENU_ITEMS.filter(item => item.price <= maxP);
+  if (text.includes('burger')) {
+    const items = MENU_ITEMS.filter((i) => i.category === 'Burgers' && i.available);
     return {
-      reply: `Found ${filtered.length} delicious options under ₹${maxP}! Check these top favorites out: 💜`,
+      intent: 'FILTER_CATEGORY',
+      reply: "Juicy handcrafted burgers! 🍔 Served on toasted sesame buns with melted cheese and zesty sauces:",
+      showMenu: true,
+      menuCategory: 'Burgers',
       actions: [],
-      suggestedItemIds: filtered.slice(0, 4).map(c => c.id),
+      suggestedItemIds: items.map((i) => i.id),
+      language: lang,
       quickReplies: [
-        { label: '🍛 Veg Biryani ₹140', actionText: 'I want 1 veg biryani' },
-        { label: '🌯 Paneer Roll ₹130', actionText: 'Add Paneer Roll' },
+        { label: '🍗 Chicken Burger ₹150', actionText: 'Add Chicken Burger' },
         { label: '🍔 Veg Burger ₹120', actionText: 'Add Veg Burger' }
       ]
     };
   }
 
-  // Vegetarian
-  if (text.includes('vegetarian') || text.includes('veg food') || text.includes('only veg') || text.includes('pure veg')) {
-    const vegItems = MENU_ITEMS.filter(item => item.vegetarian);
+  if (text.includes('pizza')) {
+    const items = MENU_ITEMS.filter((i) => i.category === 'Pizza' && i.available);
     return {
-      reply: "Here is our 100% vegetarian selection! From rich Paneer Butter Masala to crispy Masala Dosa and Veg Biryani. 🥗",
+      intent: 'FILTER_CATEGORY',
+      reply: "Stone-baked artisanal pizzas! 🍕 Crispy crust, San Marzano sauce, and melted mozzarella:",
+      showMenu: true,
+      menuCategory: 'Pizza',
       actions: [],
-      suggestedItemIds: ['item-3', 'item-2', 'item-5', 'item-13'],
+      suggestedItemIds: items.map((i) => i.id),
+      language: lang,
       quickReplies: [
-        { label: '🍛 Veg Biryani ₹140', actionText: 'I want 1 veg biryani' },
-        { label: '🧀 Paneer Butter Masala ₹160', actionText: 'Add Paneer Butter Masala' },
-        { label: '🥞 Masala Dosa ₹90', actionText: 'Give me 1 masala dosa' }
+        { label: '🍕 Margherita Pizza ₹220', actionText: 'Add Margherita Pizza' },
+        { label: '🍗 Chicken Pizza ₹280', actionText: 'Add Chicken Pizza' }
       ]
     };
   }
 
-  // Spicy food
-  if (text.includes('spicy') || text.includes('hot') || text.includes('fiery')) {
-    const spicyItems = MENU_ITEMS.filter(item => item.spicy);
+  // 13. REQUEST FOR UNRECOGNIZED / UNKNOWN FOOD (Strict 20-Item Menu Control)
+  const outsideFoods = ['sushi', 'pasta', 'taco', 'shawarma', 'soup', 'salad', 'momos', 'curry', 'steak', 'sandwich', 'ice cream', 'roti', 'paratha', 'paneer tikka', 'kebab', 'mutton', 'fish'];
+  if (outsideFoods.some((kw) => text.includes(kw))) {
     return {
-      reply: "Craving that fiery kick? 🔥 These spicy favorites are packed with real chili and roasted spices:",
+      intent: 'SEARCH_FOOD',
+      reply:
+        lang === 'ta-Latn'
+          ? "Sorry pa, adhu namma menu-la illa. Namma kitchen-la 20 special signature dishes mattum dhaan specialize panrom! Biryani, Pizza, Noodles explore pannalaama? 💜"
+          : lang === 'ta'
+          ? "மன்னிக்கவும், அது நமது மெனுவில் இல்லை. எங்களிடம் உள்ள 20 சிறப்பு உணவுகளில் இருந்து தேர்ந்தெடுக்கவும். 💜"
+          : "Sorry, we don't have that on our menu. We specialize in our 20 signature dishes! Would you like me to suggest something similar from our menu? 💜",
+      showMenu: true,
+      menuCategory: 'All',
       actions: [],
-      suggestedItemIds: spicyItems.slice(0, 4).map(c => c.id),
+      suggestedItemIds: ['item-1', 'item-13', 'item-3'],
+      language: lang,
       quickReplies: [
-        { label: '🍛 Chicken Biryani ₹180', actionText: 'I want 1 chicken biryani' },
-        { label: '🍕 Chicken Pizza ₹280', actionText: 'Add Chicken Pizza' },
-        { label: '🍜 Chicken Noodles ₹160', actionText: 'Add Chicken Noodles' }
+        { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' },
+        { label: langPack.quickReplies.biryani, actionText: lang === 'ta-Latn' ? 'enaku chicken biryani venum' : 'I want Biryani' }
       ]
     };
   }
 
-  // For two people / combo
-  if (text.includes('two people') || text.includes('for 2') || text.includes('couple') || text.includes('combo')) {
-    return {
-      reply: "For two people, I recommend 2 Biryanis (or 1 Biryani + 1 Pizza) paired with cold Cokes and warm Gulab Jamuns! 👫 Here are the essentials:",
-      actions: [],
-      suggestedItemIds: ['item-1', 'item-13', 'item-19', 'item-17'],
-      quickReplies: [
-        { label: '🍛 Add 2 Chicken Biryanis', actionText: 'I want 2 chicken biryanis' },
-        { label: '🥤 Add 2 Cokes', actionText: 'Add 2 Cokes' },
-        { label: '🩷 Checkout', actionText: 'Checkout' }
-      ]
-    };
-  }
-
-  // Dessert
-  if (text.includes('dessert') || text.includes('sweet') || text.includes('gulab jamun') || text.includes('brownie')) {
-    const desserts = MENU_ITEMS.filter(item => item.category === 'Dessert');
-    return {
-      reply: "Life is sweet! 🍰 Indulge in our melt-in-mouth warm Gulab Jamuns or rich Chocolate Brownie:",
-      actions: [],
-      suggestedItemIds: desserts.map(c => c.id),
-      quickReplies: [
-        { label: '🍯 Gulab Jamun ₹70', actionText: 'Add Gulab Jamun' },
-        { label: '🍫 Chocolate Brownie ₹100', actionText: 'Add Chocolate Brownie' }
-      ]
-    };
-  }
-
-  // Drinks / Beverages
-  if (text.includes('drink') || text.includes('beverage') || text.includes('juice') || text.includes('coke') && !text.includes('add') && !text.includes('remove')) {
-    const drinks = MENU_ITEMS.filter(item => item.category === 'Beverages');
-    return {
-      reply: "Need a refreshing drink? 🥤 Chill out with an ice-cold Coke or zesty Fresh Lime Juice!",
-      actions: [],
-      suggestedItemIds: drinks.map(c => c.id),
-      quickReplies: [
-        { label: '🥤 Coke ₹50', actionText: 'Add one Coke' },
-        { label: '🍋 Fresh Lime ₹70', actionText: 'Add Fresh Lime Juice' },
-        { label: '❌ No thanks', actionText: 'No thanks' }
-      ]
-    };
-  }
-
-  // "No thanks"
-  if (text === 'no thanks' || text === 'no' || text === 'nope') {
-    return {
-      reply: "All good! Your order is looking great. Would you like to proceed to checkout or add anything else? 💜",
-      actions: [],
-      suggestedItemIds: [],
-      quickReplies: [
-        { label: '🩷 Proceed to Checkout', actionText: 'Checkout' },
-        { label: '🛒 View Cart', actionText: 'Show my cart' }
-      ]
-    };
-  }
-
-  // Remove item
-  if (text.includes('remove') || text.includes('delete') || text.includes('minus') || text.includes('drop')) {
-    let matchedItem = MENU_ITEMS.find(m => text.includes(m.name.toLowerCase()) || text.includes(m.tags?.[0] || ''));
-    if (!matchedItem) {
-      if (text.includes('biryani')) matchedItem = MENU_ITEMS[0];
-      else if (text.includes('coke')) matchedItem = MENU_ITEMS[18];
-      else if (text.includes('pizza')) matchedItem = MENU_ITEMS[12];
-    }
-    if (matchedItem) {
-      return {
-        reply: `Done! 🗑️ I've removed ${matchedItem.name} from your cart.`,
-        actions: [{ type: 'REMOVE_ITEM', itemId: matchedItem.id, quantity: 1 }],
-        suggestedItemIds: [matchedItem.id],
-        quickReplies: [
-          { label: '🛒 Show Cart', actionText: 'Show my cart' },
-          { label: '🩷 Checkout', actionText: 'Checkout' }
-        ]
-      };
-    }
-  }
-
-  // Modify quantity (e.g., "Make biryani quantity 4")
-  const makeQtyMatch = text.match(/make\s+(.*?)\s+(?:quantity|qty)?\s*(\d+)/i) || text.match(/set\s+(.*?)\s+(?:quantity|qty)?\s*to\s*(\d+)/i);
-  if (makeQtyMatch) {
-    const itemNamePart = makeQtyMatch[1].trim();
-    const qty = parseInt(makeQtyMatch[2], 10);
-    const matchedItem = MENU_ITEMS.find(m => m.name.toLowerCase().includes(itemNamePart) || itemNamePart.includes(m.name.toLowerCase())) ||
-      (itemNamePart.includes('biryani') ? MENU_ITEMS[0] : MENU_ITEMS[18]);
-
-    return {
-      reply: `Updated! ✍️ I've updated the quantity of ${matchedItem.name} to ${qty}.`,
-      actions: [{ type: 'UPDATE_QUANTITY', itemId: matchedItem.id, quantity: qty }],
-      suggestedItemIds: [matchedItem.id],
-      quickReplies: [
-        { label: '🥤 Add a Coke ₹50', actionText: 'Add a Coke' },
-        { label: '🩷 Checkout', actionText: 'Checkout' }
-      ]
-    };
-  }
-
-  // Add Item / Ordering intent (e.g. "I want 2 chicken biryanis", "Give me 3 dosas", "Add a Coke")
-  // Extract number (default 1)
-  let quantity = 1;
-  const wordToNum: Record<string, number> = {
-    'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7, 'eight': 8, 'nine': 9, 'ten': 10,
-    'a': 1, 'an': 1
-  };
-  const numMatch = text.match(/\b(\d+)\b/);
-  if (numMatch) {
-    quantity = parseInt(numMatch[1], 10);
-  } else {
-    for (const [w, n] of Object.entries(wordToNum)) {
-      const reg = new RegExp(`\\b${w}\\b`, 'i');
-      if (reg.test(text)) {
-        quantity = n;
-        break;
-      }
-    }
-  }
-
-  // Match menu item
-  let foundItem = MENU_ITEMS.find(item => text.includes(item.name.toLowerCase()));
-  if (!foundItem) {
-    // Specific aliases
-    if (text.includes('chicken biryani')) foundItem = MENU_ITEMS.find(i => i.name === 'Chicken Biryani');
-    else if (text.includes('veg biryani')) foundItem = MENU_ITEMS.find(i => i.name === 'Veg Biryani');
-    else if (text.includes('biryani')) foundItem = MENU_ITEMS.find(i => i.name === 'Chicken Biryani');
-    else if (text.includes('dosa')) foundItem = MENU_ITEMS.find(i => i.name === 'Masala Dosa');
-    else if (text.includes('idli')) foundItem = MENU_ITEMS.find(i => i.name === 'Idli');
-    else if (text.includes('naan')) foundItem = MENU_ITEMS.find(i => i.name === 'Butter Naan');
-    else if (text.includes('paneer butter') || text.includes('butter masala')) foundItem = MENU_ITEMS.find(i => i.name === 'Paneer Butter Masala');
-    else if (text.includes('paneer roll')) foundItem = MENU_ITEMS.find(i => i.name === 'Paneer Roll');
-    else if (text.includes('coke') || text.includes('cola')) foundItem = MENU_ITEMS.find(i => i.name === 'Coke');
-    else if (text.includes('lime') || text.includes('lemon')) foundItem = MENU_ITEMS.find(i => i.name === 'Fresh Lime Juice');
-    else if (text.includes('chicken pizza')) foundItem = MENU_ITEMS.find(i => i.name === 'Chicken Pizza');
-    else if (text.includes('margherita') || text.includes('cheese pizza')) foundItem = MENU_ITEMS.find(i => i.name === 'Margherita Pizza');
-    else if (text.includes('chicken burger')) foundItem = MENU_ITEMS.find(i => i.name === 'Chicken Burger');
-    else if (text.includes('veg burger')) foundItem = MENU_ITEMS.find(i => i.name === 'Veg Burger');
-    else if (text.includes('fries')) foundItem = MENU_ITEMS.find(i => i.name === 'French Fries');
-    else if (text.includes('brownie')) foundItem = MENU_ITEMS.find(i => i.name === 'Chocolate Brownie');
-    else if (text.includes('gulab jamun') || text.includes('jamun')) foundItem = MENU_ITEMS.find(i => i.name === 'Gulab Jamun');
-    else if (text.includes('fried rice')) foundItem = text.includes('veg') ? MENU_ITEMS.find(i => i.name === 'Veg Fried Rice') : MENU_ITEMS.find(i => i.name === 'Chicken Fried Rice');
-    else if (text.includes('noodles')) foundItem = text.includes('veg') ? MENU_ITEMS.find(i => i.name === 'Veg Noodles') : MENU_ITEMS.find(i => i.name === 'Chicken Noodles');
-  }
-
-  if (foundItem) {
-    const isDrink = foundItem.category === 'Beverages';
-    const isDessert = foundItem.category === 'Dessert';
-
-    let drinkUpsell = !isDrink ? "Would you like something to drink? 🩷" : "Would you like something sweet to finish off? 🍰";
-    let quicks = !isDrink ? [
-      { label: '🥤 Coke ₹50', actionText: 'Add one Coke' },
-      { label: '🍋 Fresh Lime ₹70', actionText: 'Add Fresh Lime Juice' },
-      { label: '❌ No thanks', actionText: 'No thanks' }
-    ] : [
-      { label: '🍯 Gulab Jamun ₹70', actionText: 'Add Gulab Jamun' },
-      { label: '🩷 Checkout', actionText: 'Checkout' }
-    ];
-
-    return {
-      reply: `Absolutely! 🍛 I've added ${quantity} ${foundItem.name}${quantity > 1 ? 's' : ''} to your cart. ${drinkUpsell}`,
-      actions: [{ type: 'ADD_ITEM', itemId: foundItem.id, quantity }],
-      suggestedItemIds: [foundItem.id],
-      quickReplies: quicks
-    };
-  }
-
-  // If item doesn't exist on menu
+  // Default conversational fallback
   return {
-    reply: "Sorry, we don't have that on our menu. Would you like me to suggest something similar? 💜 Here are some of our top rated dishes:",
+    intent: 'GENERAL_CONVERSATION',
+    reply: langPack.greeting,
+    showMenu: false,
     actions: [],
-    suggestedItemIds: ['item-1', 'item-13', 'item-3', 'item-5'],
+    suggestedItemIds: [],
+    language: lang,
     quickReplies: [
-      { label: '🍛 Chicken Biryani ₹180', actionText: 'I want 1 chicken biryani' },
-      { label: '🍕 Margherita Pizza ₹220', actionText: 'Add Margherita Pizza' },
-      { label: '🥗 Show vegetarian food', actionText: 'Show vegetarian food' }
+      { label: langPack.quickReplies.showMenu, actionText: lang === 'ta-Latn' ? 'menu kaatu' : 'Show me the menu' },
+      { label: langPack.quickReplies.biryani, actionText: lang === 'ta-Latn' ? 'enaku chicken biryani venum' : 'I want Biryani' },
+      { label: langPack.quickReplies.vegFood, actionText: lang === 'ta-Latn' ? 'veg food mattum kaatu' : 'Show vegetarian food' },
+      { label: langPack.quickReplies.under150, actionText: lang === 'ta-Latn' ? '150 kulla enna irukku?' : 'Show me items under ₹150' }
     ]
   };
 }
@@ -392,7 +780,13 @@ function handleHeuristicNLU(message: string, currentCart: any[], checkoutStep?: 
 // Chat API Route
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, cart = [], checkoutStep = 'idle' } = req.body;
+    const {
+      message,
+      cart = [],
+      checkoutStep = 'idle',
+      language = 'auto',
+      unavailableItemIds = []
+    } = req.body;
 
     if (!message || typeof message !== 'string') {
       return res.status(400).json({ error: 'Message is required' });
@@ -400,69 +794,70 @@ app.post('/api/chat', async (req, res) => {
 
     const ai = getGenAI();
 
-    // If Gemini key is available, attempt Gemini processing with structured output
+    // If Gemini key is available, attempt Gemini processing with structured schema
     if (ai) {
       try {
-        const menuContext = MENU_ITEMS.map(i => ({
+        const menuContext = MENU_ITEMS.map((i) => ({
           id: i.id,
           name: i.name,
           category: i.category,
           price: i.price,
           veg: i.vegetarian,
           spicy: i.spicy,
+          available: i.available && !unavailableItemIds.includes(i.id),
           desc: i.description
         }));
 
-        const systemPrompt = `You are FoodBot, a friendly, fast, and conversational AI Food Ordering Assistant with a purple & pink aesthetic.
+        const systemPrompt = `You are FoodBot, a friendly and accurate AI Food Ordering Assistant with a purple & pink aesthetic.
 Personality:
-- Friendly, Helpful, Fast, Conversational, Slightly playful ("Yay! 🎉 Your biryani is in the cart!", "Great choice! 💜", "Want something sweet after that? 🍰").
-- Keep responses concise (1-3 sentences maximum).
+- Friendly, Helpful, Conversational, Natural ("Yay! 🎉", "Sure! 🩷").
+- Keep responses concise (1-2 sentences).
 
-CRITICAL STRICT RULES:
-1. NEVER invent food items, prices, availability, or discounts. You can ONLY use the following 20 menu items:
+MULTILINGUAL & TANGLISH:
+- Understand English, Tamil script ('ta'), Tanglish ('ta-Latn' - Tamil written in Latin letters, e.g. "vanakkam", "enaku chicken biryani venum", "rendu biryani kudu", "oru coke add pannu", "coke remove pannu", "menu kaatu", "veg food mattum kaatu", "150 kulla enna irukku?", "enaku pasikuthu"), Hindi ('hi'), Telugu ('te'), Malayalam ('ml'), Kannada ('kn').
+- If user uses Tanglish, classify language as "ta-Latn" and respond naturally in Tanglish!
+- If user says "vanakkam", reply: "Vanakkam! 👋 Welcome to FoodBot! Eppadi help pannalaam?"
+- If user expresses hunger (e.g. "enaku pasikuthu", "enaku romba pasikuthu", "I'm hungry"), respond conversationally: "Aiyo 😄! Appo nalla saapadu venum! Menu kaatava?" DO NOT treat this as a food command or add food!
+- If user says "menu kaatu", "show menu", "menu kudu", set "showMenu": true and intent: "MENU_REQUEST".
+- If user says "veg food mattum kaatu", set "showMenu": true, "filterVeg": true, intent: "FILTER_VEG".
+- If user says "150 kulla enna irukku?", set "showMenu": true, "maxPrice": 150, intent: "FILTER_PRICE".
+- If user says "Hi", "Hello", "How are you", "Thank you", respond conversationally. DO NOT show the menu!
+
+STRICT 20 PRODUCTS ONLY:
 ${JSON.stringify(menuContext)}
-2. If an item doesn't exist: "Sorry, we don't have that on our menu. Would you like me to suggest something similar?"
-3. If an item is unavailable: "Sorry, that item is currently unavailable. Here are some alternatives."
-4. Always parse user ordering intents accurately:
-   - "I want 2 chicken biryanis" -> add item-1 with quantity 2
-   - "Give me 3 dosas" -> add item-5 with quantity 3
-   - "Add a Coke" -> add item-19 with quantity 1
-   - "Remove one Coke" -> remove item-19
-   - "Make biryani quantity 4" -> update item-1 quantity to 4
-   - "Show my cart" -> summarize cart items and subtotal
-   - "What's the cheapest food?" -> recommend Butter Naan (item-4) and Coke (item-19) at ₹50, Idli (item-6) at ₹60, Gulab Jamun (item-17) at ₹70
-   - "Show vegetarian food" -> suggest vegetarian items
-   - "I want something under ₹200" -> suggest items <= 200
-   - "I want something spicy" -> suggest spicy items (item-1, item-2, item-9, item-14, item-16)
-   - "I'm ordering for two people" -> recommend a 2-person combo (e.g. Biryanis + Starters + Drinks)
-   - "I changed my mind" -> clear cart
-   - "Checkout" -> start checkout flow: ask for name first, then delivery address, then payment method (Cash on Delivery, UPI, Card)
-5. When recommending or modifying items, always include their exact 'id' in 'suggestedItemIds'.
-6. Provide helpful quickReplies buttons.
+Never invent food items or prices.
+Availability check: If item has "available": false, DO NOT add it. Instead apologize and recommend an available alternative.
 
 Current Cart: ${JSON.stringify(cart)}
 Current Checkout Step: ${checkoutStep}
+Client Language: ${language}
 
-Respond in strict JSON format:
+Respond in strict JSON:
 {
-  "reply": "Conversational reply with emojis",
+  "intent": "GREETING" | "GENERAL_CONVERSATION" | "MENU_REQUEST" | "SEARCH_FOOD" | "FILTER_CATEGORY" | "FILTER_PRICE" | "FILTER_VEG" | "CHECK_AVAILABILITY" | "ADD_TO_CART" | "REMOVE_FROM_CART" | "UPDATE_QUANTITY" | "SHOW_CART" | "CHECKOUT" | "ORDER_STATUS" | "HELP",
+  "reply": "Conversational reply in detected language",
+  "language": "en" | "ta" | "ta-Latn" | "hi" | "te" | "ml" | "kn",
+  "showMenu": boolean,
+  "filterVeg": boolean,
+  "maxPrice": number,
+  "menuCategory": "All" | "Indian" | "Chinese" | "Burgers" | "Pizza" | "Snacks" | "Desserts" | "Beverages",
   "actions": [
     { "type": "ADD_ITEM" | "REMOVE_ITEM" | "UPDATE_QUANTITY" | "CLEAR_CART" | "START_CHECKOUT" | "SHOW_CART", "itemId": "item-id", "quantity": 1 }
   ],
   "suggestedItemIds": ["item-id"],
   "quickReplies": [
-    { "label": "Button text with emoji", "actionText": "Text to send when tapped" }
+    { "label": "Button text", "actionText": "Text to send" }
   ],
   "checkoutStep": "name" | "address" | "payment" | "confirm" | "none"
 }`;
 
         const response = await ai.models.generateContent({
-          model: 'gemini-3.8-flash',
+          model: 'gemini-2.5-flash',
           contents: message,
           config: {
             systemInstruction: systemPrompt,
             responseMimeType: 'application/json',
-            temperature: 0.3,
+            temperature: 0.2,
           },
         });
 
@@ -472,12 +867,18 @@ Respond in strict JSON format:
           return res.json(parsed);
         }
       } catch (geminiError) {
-        console.warn('Gemini call failed or timed out, falling back to local heuristic NLU:', geminiError);
+        console.warn('Gemini call failed, falling back to heuristic NLU:', geminiError);
       }
     }
 
-    // Heuristic fallback NLU
-    const fallbackResult = handleHeuristicNLU(message, cart, checkoutStep);
+    // Heuristic fallback NLU (deterministic, instant, handles all Tanglish, Tamil, English, and commands)
+    const fallbackResult = handleHeuristicNLU(
+      message,
+      cart,
+      checkoutStep,
+      language,
+      unavailableItemIds
+    );
     return res.json(fallbackResult);
   } catch (err: any) {
     console.error('Chat error:', err);

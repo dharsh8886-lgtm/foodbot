@@ -10,26 +10,30 @@ import { OrderConfirmationModal } from './components/OrderConfirmationModal';
 import { MENU_ITEMS, findItemByName } from './data/menu';
 import { ActiveTab, CartItem, ChatMessage, FoodItem, Order, CheckoutStep } from './types';
 import { MessageSquare, ShoppingCart, Package, Heart, Settings, User } from 'lucide-react';
+import { SupportedLanguage } from './utils/multilingual';
 
 const INITIAL_MESSAGES: ChatMessage[] = [
   {
     id: 'welcome-1',
     sender: 'bot',
-    text: "Hey! 👋 I'm FoodBot. What are you craving today? 💜\nTell me what you want and I'll handle the rest.",
+    text: "Hi! 👋 Welcome to FoodBot. I'm your AI food assistant.\nI can help you explore the menu, choose food, place an order, or answer questions. What would you like to do?",
     timestamp: Date.now(),
     quickReplies: [
+      { label: '📜 Show Menu', actionText: 'Show me the menu' },
       { label: '🍛 I want Biryani', actionText: 'I want Biryani' },
       { label: '🍕 Show me Pizza', actionText: 'Show me Pizza' },
       { label: '🥗 Vegetarian food', actionText: 'Show vegetarian food' },
       { label: '💰 Under ₹150', actionText: 'Show me items under ₹150' },
-      { label: '🔥 Something spicy', actionText: 'I want something spicy' },
-      { label: '🍰 Dessert', actionText: 'Show me desserts' }
+      { label: '💡 What can you do?', actionText: 'What can you do?' }
     ]
   }
 ];
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('chat');
+  const [menuItems, setMenuItems] = useState<FoodItem[]>(MENU_ITEMS);
+  const [selectedLanguage, setSelectedLanguage] = useState<SupportedLanguage>('en');
+
   const [cartItems, setCartItems] = useState<CartItem[]>(() => {
     try {
       const saved = localStorage.getItem('foodbot_cart');
@@ -123,21 +127,57 @@ export default function App() {
     }
   }, [messages]);
 
-  // Cart operations
+  // Toggle item availability for testing
+  const handleToggleAvailability = (itemId: string) => {
+    setMenuItems((prev) =>
+      prev.map((item) =>
+        item.id === itemId ? { ...item, available: !item.available } : item
+      )
+    );
+  };
+
+  // Cart operations (Strict Availability Check)
   const handleAddToCart = (item: FoodItem, quantity: number = 1) => {
+    const currentItem = menuItems.find((m) => m.id === item.id) || item;
+
+    if (currentItem.available === false) {
+      // Find an available alternative
+      const alt =
+        menuItems.find((m) => m.category === currentItem.category && m.id !== currentItem.id && m.available) ||
+        menuItems.find((m) => m.vegetarian === currentItem.vegetarian && m.id !== currentItem.id && m.available);
+
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `unavail-${Date.now()}`,
+          sender: 'bot',
+          text: `Sorry, ${currentItem.name} is currently unavailable. Would you like ${alt?.name || 'another dish from our menu'} instead? 💜`,
+          timestamp: Date.now(),
+          recommendedItems: alt ? [alt] : [],
+          quickReplies: alt
+            ? [
+                { label: `+ Add ${alt.name} ₹${alt.price}`, actionText: `Add ${alt.name}` },
+                { label: '📜 Show Menu', actionText: 'Show me the menu' }
+              ]
+            : [{ label: '📜 Show Menu', actionText: 'Show me the menu' }]
+        }
+      ]);
+      return;
+    }
+
     setCartItems((prev) => {
-      const existing = prev.find((c) => c.item.id === item.id);
+      const existing = prev.find((c) => c.item.id === currentItem.id);
       if (existing) {
         return prev.map((c) =>
-          c.item.id === item.id ? { ...c, quantity: c.quantity + quantity } : c
+          c.item.id === currentItem.id ? { ...c, quantity: c.quantity + quantity } : c
         );
       }
-      return [...prev, { item, quantity }];
+      return [...prev, { item: currentItem, quantity }];
     });
 
     // Provide friendly in-chat acknowledgement
     const drinkPicks = [
-      { label: '🥤 Coke ₹50', actionText: 'Add one Coke' },
+      { label: '🥤 Coke ₹50', actionText: 'Add a Coke' },
       { label: '🍋 Fresh Lime ₹70', actionText: 'Add Fresh Lime Juice' },
       { label: '🩷 Checkout', actionText: 'Checkout' }
     ];
@@ -147,10 +187,10 @@ export default function App() {
       {
         id: `ack-${Date.now()}`,
         sender: 'bot',
-        text: `Yay! 🎉 Added ${quantity} ${item.name}${quantity > 1 ? 's' : ''} to your cart! Would you like something to drink? 🩷`,
+        text: `Yay! 🎉 Added ${quantity} ${currentItem.name}${quantity > 1 ? 's' : ''} to your cart! Would you like something to drink? 🩷`,
         timestamp: Date.now(),
-        recommendedItems: [item],
-        quickReplies: item.category === 'Beverages' ? [{ label: '🩷 Checkout', actionText: 'Checkout' }] : drinkPicks
+        recommendedItems: [currentItem],
+        quickReplies: currentItem.category === 'Beverages' ? [{ label: '🩷 Checkout', actionText: 'Checkout' }] : drinkPicks
       }
     ]);
   };
@@ -196,6 +236,7 @@ export default function App() {
         text: "I've cleared your cart. What else would you like to explore? 💜",
         timestamp: Date.now(),
         quickReplies: [
+          { label: '📜 Show Menu', actionText: 'Show me the menu' },
           { label: '🍛 I want Biryani', actionText: 'I want Biryani' },
           { label: '🍕 Show me Pizza', actionText: 'Show me Pizza' }
         ]
@@ -228,6 +269,7 @@ export default function App() {
           text: "Your cart is currently empty! Add something delicious first. What are you craving? 🍛",
           timestamp: Date.now(),
           quickReplies: [
+            { label: '📜 Show Menu', actionText: 'Show me the menu' },
             { label: '🍛 Chicken Biryani ₹180', actionText: 'I want 1 chicken biryani' },
             { label: '🍕 Margherita Pizza ₹220', actionText: 'Add Margherita Pizza' }
           ]
@@ -256,31 +298,28 @@ export default function App() {
     ]);
   };
 
-  // Place Order finalization
-  const handlePlaceOrder = ({
-    name,
-    address,
-    paymentMethod
-  }: {
+  // Order placement
+  const handlePlaceOrder = (details: {
     name: string;
     address: string;
     paymentMethod: 'Cash on Delivery' | 'UPI' | 'Card';
   }) => {
+    if (cartItems.length === 0) return;
+
     const subtotal = cartItems.reduce((acc, c) => acc + c.item.price * c.quantity, 0);
     const deliveryFee = 30;
     const total = subtotal + deliveryFee;
-    const orderId = `FB20260909${Math.floor(1000 + Math.random() * 9000)}`;
 
     const newOrder: Order = {
-      id: orderId,
+      id: `FB${Date.now().toString().slice(-6)}`,
       date: 'Just now',
       items: [...cartItems],
       subtotal,
       deliveryFee,
       total,
-      customerName: name,
-      deliveryAddress: address,
-      paymentMethod,
+      customerName: details.name || 'Valued Foodie',
+      deliveryAddress: details.address || '22 Baker Street, Apt 4B',
+      paymentMethod: details.paymentMethod,
       status: 'Confirmed',
       estimatedDelivery: '25–35 minutes',
       createdAt: Date.now()
@@ -291,24 +330,23 @@ export default function App() {
     setCheckoutStep('idle');
     setConfirmedOrder(newOrder);
 
-    // Add comprehensive order confirmation card directly to the conversation
-    setMessages((prev) => [
-      ...prev,
-      {
-        id: `order-placed-${Date.now()}`,
-        sender: 'bot',
-        text: `🎉 Order Confirmed! "Your food is being prepared."\nOrder ID: ${orderId}\nTotal: ₹${total} via ${paymentMethod}.\nEstimated delivery in 25–35 minutes.`,
-        timestamp: Date.now(),
-        orderConfirmation: newOrder,
-        quickReplies: [
-          { label: '📦 Track Orders', actionText: 'Show past orders' },
-          { label: '💬 Order More Food', actionText: 'What else do you have?' }
-        ]
-      }
-    ]);
+    // Bot celebratory message
+    const orderMsg: ChatMessage = {
+      id: `bot-order-placed-${Date.now()}`,
+      sender: 'bot',
+      text: `Woohoo! 🎉 Order #${newOrder.id} has been placed successfully!\nYour chef has fired up the kitchen. Fresh hot food will arrive in 25–35 minutes! 🚀`,
+      timestamp: Date.now(),
+      orderConfirmation: newOrder,
+      quickReplies: [
+        { label: '📦 Track Order Status', actionText: 'What is my order status?' },
+        { label: '📜 Show Menu', actionText: 'Show me the menu' }
+      ]
+    };
+
+    setMessages((prev) => [...prev, orderMsg]);
   };
 
-  // Re-order previous order
+  // Re-order from history
   const handleOrderAgain = (order: Order) => {
     setCartItems(order.items);
     setActiveTab('chat');
@@ -349,7 +387,9 @@ export default function App() {
         body: JSON.stringify({
           message: text,
           cart: cartItems,
-          checkoutStep
+          checkoutStep,
+          language: selectedLanguage,
+          unavailableItemIds: menuItems.filter((m) => !m.available).map((m) => m.id)
         })
       });
 
@@ -359,12 +399,17 @@ export default function App() {
 
       const data = await response.json();
 
+      // If language was detected or returned
+      if (data.language && ['en', 'ta', 'ta-Latn', 'hi', 'te', 'ml', 'kn'].includes(data.language)) {
+        setSelectedLanguage(data.language);
+      }
+
       // Execute returned actions
       if (data.actions && Array.isArray(data.actions)) {
         for (const action of data.actions) {
           if (action.type === 'ADD_ITEM' && action.itemId) {
-            const item = MENU_ITEMS.find((m) => m.id === action.itemId);
-            if (item) {
+            const item = menuItems.find((m) => m.id === action.itemId) || MENU_ITEMS.find((m) => m.id === action.itemId);
+            if (item && item.available !== false) {
               const qty = action.quantity || 1;
               setCartItems((prev) => {
                 const existing = prev.find((c) => c.item.id === item.id);
@@ -422,7 +467,7 @@ export default function App() {
       let recommended: FoodItem[] = [];
       if (data.suggestedItemIds && Array.isArray(data.suggestedItemIds)) {
         recommended = data.suggestedItemIds
-          .map((id: string) => MENU_ITEMS.find((m) => m.id === id))
+          .map((id: string) => menuItems.find((m) => m.id === id) || MENU_ITEMS.find((m) => m.id === id))
           .filter(Boolean) as FoodItem[];
       }
 
@@ -433,7 +478,13 @@ export default function App() {
         timestamp: Date.now(),
         recommendedItems: recommended,
         quickReplies: data.quickReplies || [],
-        checkoutStep: data.checkoutStep && data.checkoutStep !== 'none' ? data.checkoutStep : undefined
+        checkoutStep: data.checkoutStep && data.checkoutStep !== 'none' ? data.checkoutStep : undefined,
+        showMenu: Boolean(data.showMenu),
+        menuCategory: data.menuCategory,
+        filterVeg: Boolean(data.filterVeg),
+        maxPrice: data.maxPrice,
+        intent: data.intent,
+        language: data.language
       };
 
       setMessages((prev) => [...prev, botMsg]);
@@ -447,8 +498,9 @@ export default function App() {
           sender: 'bot',
           text: "I'm right here! 💜 Our Chicken Biryani, Margherita Pizza, and Fresh Lime Juice are trending right now. What would you like to try?",
           timestamp: Date.now(),
-          recommendedItems: [MENU_ITEMS[0], MENU_ITEMS[12]],
+          recommendedItems: [menuItems[0], menuItems[12]],
           quickReplies: [
+            { label: '📜 Show Menu', actionText: 'Show me the menu' },
             { label: '🍛 1 Chicken Biryani ₹180', actionText: 'I want 1 chicken biryani' },
             { label: '🍕 1 Margherita Pizza ₹220', actionText: 'Add Margherita Pizza' }
           ]
@@ -507,12 +559,16 @@ export default function App() {
               onSendMessage={handleSendMessage}
               onClearChat={handleClearChat}
               onAddToCart={handleAddToCart}
+              onUpdateQuantity={handleUpdateQuantity}
               cartItems={cartItems}
               favorites={favorites}
+              menuItems={menuItems}
               onToggleFavorite={handleToggleFavorite}
               onPlaceOrder={handlePlaceOrder}
               checkoutStep={checkoutStep}
               setCheckoutStep={setCheckoutStep}
+              selectedLanguage={selectedLanguage}
+              onSelectLanguage={setSelectedLanguage}
             />
           )}
 
@@ -553,6 +609,10 @@ export default function App() {
             <SettingsView
               onClearAllData={handleClearAllData}
               onNavigateToChat={() => setActiveTab('chat')}
+              menuItems={menuItems}
+              onToggleAvailability={handleToggleAvailability}
+              selectedLanguage={selectedLanguage}
+              onSelectLanguage={setSelectedLanguage}
             />
           )}
         </main>

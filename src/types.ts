@@ -35,6 +35,12 @@ export interface ChatMessage {
   };
   checkoutStep?: CheckoutStep;
   orderConfirmation?: Order;
+  intent?: string;
+  showMenu?: boolean;
+  menuCategory?: string;
+  filterVeg?: boolean;
+  maxPrice?: number;
+  language?: string;
 }
 
 export interface Order {
